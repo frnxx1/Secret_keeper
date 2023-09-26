@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 
 	"server/pkg/key"
@@ -24,13 +26,7 @@ func writeInternalError(c *gin.Context) {
 }
 
 func validationTTL(ttl int) bool {
-	if ttl >= MAX_TTL {
-		return false
-	}
-	if ttl < MIN_TTL {
-		return false
-	}
-	return true
+	return ttl <= MAX_TTL && ttl > MIN_TTL
 }
 
 func writeLimitError(c *gin.Context) {
@@ -38,87 +34,103 @@ func writeLimitError(c *gin.Context) {
 }
 
 func indexView(c *gin.Context) {
-	c.HTML(http.StatusOK,
+	c.HTML(
+		http.StatusOK,
 		"index.html",
-		gin.H{"maxTTL": MAX_TTL,
+		gin.H{
+			"maxTTL":           MAX_TTL,
 			"maxMessageLenght": 1024,
-			"minTTL":           MIN_TTL})
+			"minTTL":           MIN_TTL,
+		},
+	)
 }
 
-func saveMessageView(c *gin.Context, keyBuilder key.KeyBuilder, keeper storage.Keeper) {
-	message := c.PostForm("message")
+func saveMessageView(ctx *gin.Context, keyBuilder key.KeyBuilder, keeper keeper) {
+	message := ctx.PostForm("message")
 
 	if !validationCheckMessage(message) {
-		writeLimitError(c)
+		writeLimitError(ctx)
 		return
 	}
 
-	ttl, err := strconv.Atoi(c.PostForm("ttl"))
+	ttl, err := strconv.Atoi(ctx.PostForm("ttl"))
 	if err != nil {
 		ttl = 0
 	}
 
 	if !validationTTL(ttl) {
 		log.Println("Bad ttl")
-		writeLimitError(c)
+		writeLimitError(ctx)
 		return
 	}
 
-	key, err := keyBuilder.Get()
+	k, err := keyBuilder.Get()
 	if err != nil {
-		writeInternalError(c)
+		writeInternalError(ctx)
 		return
 	}
-	err = keeper.Set(key, message, ttl)
+
+	err = keeper.Set(ctx, k, message, ttl)
 	if err != nil {
-		writeInternalError(c)
+		writeInternalError(ctx)
 		return
 	}
-	c.HTML(http.StatusOK, "key.html", gin.H{"key": fmt.Sprintf("http://%s/%s", c.Request.Host, key)})
+
+	ctx.HTML(http.StatusOK, "key.html", gin.H{"key": fmt.Sprintf("http://%s/%s", ctx.Request.Host, k)})
 }
 
-func readMessageView(c *gin.Context, keyBuilder key.KeyBuilder, keeper storage.Keeper) {
-	key := c.Param("key")
-	msg, err := keeper.Get(key)
+func readMessageView(ctx *gin.Context, _ key.KeyBuilder, keeper keeper) {
+	k := ctx.Param("key")
+	msg, err := keeper.Get(ctx, k)
 	if err != nil {
 		if err.Error() == storage.NotFoundError {
-			c.HTML(http.StatusNotFound, "404.html", gin.H{})
+			ctx.HTML(http.StatusNotFound, "404.html", gin.H{})
 			return
 		}
-		writeInternalError(c)
+
+		writeInternalError(ctx)
 		return
 	}
 
-	c.HTML(http.StatusOK, "message.html", gin.H{"message": msg})
-
+	ctx.HTML(http.StatusOK, "message.html", gin.H{"message": msg})
 }
 
-func buildHandler(fn func(c *gin.Context, keyBuilder key.KeyBuilder, keeper storage.Keeper), keyBuilder key.KeyBuilder, keeper storage.Keeper) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		fn(c, keyBuilder, keeper)
+func buildHandler(fn func(ctx *gin.Context, keyBuilder key.KeyBuilder, keeper keeper), keyBuilder key.KeyBuilder, keeper keeper) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		fn(ctx, keyBuilder, keeper)
 	}
 }
 
-func getRouter(keyBuilder key.KeyBuilder, keeper storage.Keeper) *gin.Engine {
+type keeper interface {
+	Get(ctx context.Context, key string) (string, error)
+	Set(ctx context.Context, key, message string, ttl int) error
+}
+
+func getRouter(keyBuilder key.KeyBuilder, keeper keeper) *gin.Engine {
 	router := gin.Default()
 	router.LoadHTMLFiles(
-
 		"templates/index.html",
 		"templates/key.html",
 		"templates/message.html",
 		"templates/404.html",
 		"templates/500.html",
-		"templates/limit.html")
+		"templates/limit.html",
+	)
 
 	router.GET("/", indexView)
 	router.POST("/", buildHandler(saveMessageView, keyBuilder, keeper))
 	router.GET("/:key", buildHandler(readMessageView, keyBuilder, keeper))
+
 	return router
 }
 
 func main() {
-	keyBuilder := key.UUIDKeyBuilder{}
+	keyBuilder := key.NewUUIDKeyBuilder()
 	keeper := storage.GetRedisKeeper()
 	router := getRouter(keyBuilder, keeper)
-	router.Run("localhost:8080")
+	err := router.Run("localhost:8080")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s", err.Error())
+		os.Exit(1)
+	}
 }
