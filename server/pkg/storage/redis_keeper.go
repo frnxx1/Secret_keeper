@@ -10,26 +10,26 @@ import (
 )
 
 type RedisKeeper struct {
-	cn  redis.Client
-	ctx context.Context
+	cn *redis.Client // вот тут лучше ссылку на клиент хранить, чем разименовывать клиент
+	// ctx context.Context // хранить контекст плохая практика, его лучше всегда пробрасывать
 }
 
-const TTL = 0
+// const TTL = 0 // не используется
 
-func (k RedisKeeper) Get(key string) (string, error) {
-	val, err := k.cn.GetDel(k.ctx, key).Result()
+func (k *RedisKeeper) Get(ctx context.Context, key string) (string, error) {
+	val, err := k.cn.GetDel(ctx, key).Result()
 	if err == redis.Nil {
 		return "", errors.New(NotFoundError)
 	}
-	
+
 	return val, err
 }
 
-func (k RedisKeeper) Set(key, message string,ttl int) error {
+func (k *RedisKeeper) Set(ctx context.Context, key, message string, ttl int) error {
 	seconds, err := time.ParseDuration(fmt.Sprintf("%ds", ttl))
 	if err != nil {
 		return err
 	}
-	return k.cn.Set(k.ctx, key, message, seconds).Err()
-}
 
+	return k.cn.Set(ctx, key, message, seconds).Err()
+}
